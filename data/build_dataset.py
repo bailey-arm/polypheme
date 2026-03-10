@@ -233,7 +233,7 @@ def main():
         description="Build Polymarket historical dataset"
     )
     parser.add_argument(
-        "--min-volume", type=float, default=10_000,
+        "--min-volume", type=float, default=1_000,
         help="Min lifetime volume USD (default: 10000)",
     )
     parser.add_argument(

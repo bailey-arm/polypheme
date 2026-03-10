@@ -153,7 +153,7 @@ class ThresholdEntry(Signal):
     """
     name = "threshold"
 
-    def __init__(self, buy_below: float = 0.2, sell_above: float = 0.8):
+    def __init__(self, buy_below: float = 0.01, sell_above: float = 0.99):
         self.buy_below = buy_below
         self.sell_above = sell_above
 

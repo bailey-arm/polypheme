@@ -123,7 +123,7 @@ if __name__ == "__main__":
     keywords = ["russia", "ukraine", "israel", "iran", "china", "taiwan", "ceasefire"]
 
     print("Searching markets…")
-    markets = search_markets(keywords, limit=10, closed=None)
+    markets = search_markets(keywords, limit=100, closed=None)
     print(f"Found {len(markets)} market/outcome pairs. Top 10 by volume:")
     for m in markets[:10]:
         status = "closed" if m["closed"] else "open"
