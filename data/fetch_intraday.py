@@ -53,6 +53,7 @@ def is_crypto(market: dict) -> bool:
 def fetch_all_non_crypto_markets(
     min_volume: float = 10_000,
     page_size: int = 100,
+    max_markets: int = 0,
 ) -> list[dict]:
     """Page through all Gamma markets, return non-crypto ones above min_volume."""
     results, offset = [], 0
@@ -67,6 +68,8 @@ def fetch_all_non_crypto_markets(
                     "offset": offset,
                     "order": "volumeClob",
                     "ascending": False,
+                    "active": "true",
+                    "closed": "false",
                 },
                 timeout=20,
             )
@@ -88,6 +91,10 @@ def fetch_all_non_crypto_markets(
 
             if is_crypto(m):
                 continue
+
+            if max_markets and len(results) >= max_markets:
+                log.info(f"Reached max_markets={max_markets}, stopping.")
+                return results
 
             token_ids = m.get("clobTokenIds", "[]")
             if isinstance(token_ids, str):
@@ -150,12 +157,22 @@ def resolve_slugs(slugs: list[str]) -> list[dict]:
     return results
 
 
-def fetch_1m(token_id: str, retries: int = 3) -> pd.DataFrame:
+def fetch_1m(
+    token_id: str,
+    retries: int = 3,
+    start_ts: int = 0,
+    end_ts: int = 0,
+) -> pd.DataFrame:
+    params: dict = {"market": token_id, "interval": "1m", "fidelity": 10}
+    if start_ts:
+        params["startTs"] = start_ts
+    if end_ts:
+        params["endTs"] = end_ts
     for attempt in range(retries):
         try:
             r = requests.get(
                 f"{CLOB}/prices-history",
-                params={"market": token_id, "interval": "1m", "fidelity": 1},
+                params=params,
                 timeout=30,
             )
             if r.status_code == 429:
@@ -178,14 +195,20 @@ def fetch_1m(token_id: str, retries: int = 3) -> pd.DataFrame:
     return pd.DataFrame()
 
 
-def fetch_contracts(contracts: list[dict], out_path: str, sleep: float = 0.3):
+def fetch_contracts(
+    contracts: list[dict],
+    out_path: str,
+    sleep: float = 0.3,
+    start_ts: int = 0,
+    end_ts: int = 0,
+):
     frames = []
     n = len(contracts)
     log.info(f"Fetching 1m data for {n} contract(s)…")
 
     for i, c in enumerate(contracts, 1):
         log.info(f"[{i}/{n}] {c['slug']} / {c['outcome']}")
-        df = fetch_1m(c["token_id"])
+        df = fetch_1m(c["token_id"], start_ts=start_ts, end_ts=end_ts)
         if df.empty:
             log.warning("  → no data")
             continue
@@ -233,12 +256,18 @@ def main():
                         help="Fetch all non-crypto markets above min-volume")
     parser.add_argument("--min-volume", type=float, default=10_000,
                         help="Min lifetime CLOB volume USD for --all-non-crypto (default: 10000)")
+    parser.add_argument("--max-markets", type=int, default=0,
+                        help="Max non-crypto markets to collect (default: 0 = unlimited)")
     parser.add_argument("--tokens", nargs="+", metavar="TOKEN_ID", default=[],
                         help="CLOB token IDs to fetch")
     parser.add_argument("--slugs", nargs="+", metavar="SLUG", default=[],
                         help="Market slugs to resolve and fetch (Yes token)")
     parser.add_argument("--out", default=DEFAULT_OUT,
                         help=f"Output parquet path (default: {DEFAULT_OUT})")
+    parser.add_argument("--start", type=str, default=None,
+                        help="Start date for price history, e.g. 2024-06-01")
+    parser.add_argument("--end", type=str, default=None,
+                        help="End date for price history, e.g. 2024-12-31")
     args = parser.parse_args()
 
     if not args.all_non_crypto and not args.tokens and not args.slugs:
@@ -247,7 +276,10 @@ def main():
     contracts = []
 
     if args.all_non_crypto:
-        contracts = fetch_all_non_crypto_markets(min_volume=args.min_volume)
+        contracts = fetch_all_non_crypto_markets(
+            min_volume=args.min_volume,
+            max_markets=args.max_markets,
+        )
         log.info(f"Found {len(contracts)} non-crypto markets")
 
     if args.tokens:
@@ -260,7 +292,15 @@ def main():
         log.error("No contracts to fetch.")
         return
 
-    fetch_contracts(contracts, args.out)
+    import datetime
+    def _to_ts(s):
+        return int(datetime.datetime.strptime(s, "%Y-%m-%d")
+                   .replace(tzinfo=datetime.timezone.utc).timestamp())
+
+    start_ts = _to_ts(args.start) if args.start else 0
+    end_ts = _to_ts(args.end) if args.end else 0
+
+    fetch_contracts(contracts, args.out, start_ts=start_ts, end_ts=end_ts)
 
 
 if __name__ == "__main__":

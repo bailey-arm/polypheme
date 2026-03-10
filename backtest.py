@@ -45,17 +45,35 @@ MARKETS_PATH = "data/markets.parquet"
 PRICES_PATH = "data/prices.parquet"
 
 
-def load_data(yes_only: bool = True) -> tuple[pd.DataFrame, pd.DataFrame]:
+def load_data(
+    yes_only: bool = True,
+    prices_path: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Load and join price + market data. Returns (prices_df, markets_df)."""
-    prices = pd.read_parquet(PRICES_PATH)
-    markets = pd.read_parquet(MARKETS_PATH)
+    prices = pd.read_parquet(prices_path or PRICES_PATH)
 
-    if yes_only:
-        markets = markets[markets["token_index"] == 0]
+    if start:
+        prices = prices[prices["timestamp"] >= pd.Timestamp(start, tz="UTC")]
+    if end:
+        prices = prices[prices["timestamp"] < pd.Timestamp(end, tz="UTC")]
 
-    # Keep only tokens that have price data
-    valid = set(prices["token_id"].unique())
-    markets = markets[markets["token_id"].isin(valid)].copy()
+    # Intraday parquet already contains slug/outcome — build markets from it
+    if prices_path and "slug" in prices.columns:
+        markets = (
+            prices[["token_id", "slug", "outcome"]]
+            .drop_duplicates("token_id")
+            .copy()
+        )
+        markets["question"] = markets["slug"]
+        markets["closed"] = False
+    else:
+        markets = pd.read_parquet(MARKETS_PATH)
+        if yes_only:
+            markets = markets[markets["token_index"] == 0]
+        valid = set(prices["token_id"].unique())
+        markets = markets[markets["token_id"].isin(valid)].copy()
 
     return prices, markets
 
@@ -111,14 +129,14 @@ class MeanReversion(Signal):
     """
     name = "mean_reversion"
 
-    def __init__(self, window: int = 24, threshold: float = 1.0):
+    def __init__(self, window: int = 5, threshold: float = 1.0):
         self.window = window
         self.threshold = threshold
 
     def generate(self, history: pd.DataFrame) -> pd.Series:
         prices = history.set_index("timestamp")["price"]
-        roll_mean = prices.rolling(self.window, min_periods=1).mean()
-        roll_std = prices.rolling(self.window, min_periods=1).std().fillna(0)
+        roll_mean = prices.ewm(self.window, min_periods=1).mean()
+        roll_std = prices.ewm(self.window, min_periods=1).std().fillna(0)
 
         signal = pd.Series(0.0, index=prices.index)
         signal[prices < roll_mean - self.threshold * roll_std] = 1.0
@@ -165,7 +183,6 @@ class ThresholdEntry(Signal):
         # Forward-fill: hold position until a new signal fires
         signal = signal.replace(0.0, np.nan).ffill().fillna(0.0)
         return signal
-
 
 class FadeTowardsFair(Signal):
     """
@@ -236,6 +253,9 @@ def run(
     signal: Signal,
     notional: float = 100.0,
     yes_only: bool = True,
+    prices_path: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
 ) -> BacktestResult:
     """
     Run a single signal over all available markets.
@@ -248,7 +268,9 @@ def run(
     Returns:
         BacktestResult with equity curve, per-trade breakdown, and stats.
     """
-    prices_df, markets_df = load_data(yes_only=yes_only)
+    prices_df, markets_df = load_data(
+        yes_only=yes_only, prices_path=prices_path, start=start, end=end,
+    )
     meta = markets_df.set_index("token_id")
 
     all_pnl: List[pd.Series] = []
@@ -303,9 +325,8 @@ def run(
     combined = pd.concat(all_pnl, axis=1).sort_index().fillna(0.0)
     total_pnl_series = combined.sum(axis=1)
 
-    # Resample to daily for cleaner equity curve
     daily = total_pnl_series.resample("1D").sum()
-    equity = daily.cumsum()
+    equity = total_pnl_series.cumsum()
 
     return BacktestResult(
         signal_name=signal.name,
@@ -518,6 +539,19 @@ def main():
         "--save", type=str, default=None,
         help="Save plot to this path instead of displaying",
     )
+    parser.add_argument(
+        "--prices", type=str, default=None,
+        help="Path to prices parquet (default: data/prices.parquet). "
+             "Pass data/intraday_1m.parquet to use intraday data.",
+    )
+    parser.add_argument(
+        "--start", type=str, default=None,
+        help="Start date filter, e.g. 2024-06-01",
+    )
+    parser.add_argument(
+        "--end", type=str, default=None,
+        help="End date filter, e.g. 2024-12-31",
+    )
     args = parser.parse_args()
 
     yes_only = not args.all_outcomes
@@ -527,7 +561,8 @@ def main():
         results = []
         for name, sig in ALL_SIGNALS.items():
             print(f"  {name}…", end=" ", flush=True)
-            r = run(sig, notional=args.notional, yes_only=yes_only)
+            r = run(sig, notional=args.notional, yes_only=yes_only,
+                    prices_path=args.prices, start=args.start, end=args.end)
             results.append(r)
             print(f"PnL=${r.stats['total_pnl']:.2f}")
         plot_compare(results, save_path=args.save)
@@ -539,7 +574,8 @@ def main():
             )
         sig = ALL_SIGNALS[args.signal]
         print(f"Running {sig.name}…")
-        r = run(sig, notional=args.notional, yes_only=yes_only)
+        r = run(sig, notional=args.notional, yes_only=yes_only,
+                prices_path=args.prices, start=args.start, end=args.end)
         # Print per-market breakdown
         print(f"\n{'Slug':<45} {'Closed':>7} {'Entry':>7} "
               f"{'Exit':>7} {'AvgPos':>7} {'PnL':>8}")
